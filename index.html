@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CF 道具在线查询系统 (云端同步版)</title>
+    <style>
+        /* 样式保持之前的优化版不变 */
+        :root { --bg-color: #1a1a1a; --card-bg: #2d2d2d; --text-main: #e0e0e0; --text-muted: #a0a0a0; --accent: #00d2ff; --border: #444; }
+        body { font-family: "Microsoft YaHei", sans-serif; background-color: var(--bg-color); color: var(--text-main); margin: 0; padding: 20px; display: flex; flex-direction: column; height: 100vh; box-sizing: border-box; }
+        .header { background-color: var(--card-bg); padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 15px; align-items: center; }
+        .title { font-size: 1.2rem; font-weight: bold; color: var(--accent); margin-right: auto; }
+        .search-group { display: flex; gap: 10px; flex-grow: 1; max-width: 600px; }
+        input[type="text"] { background: #111; border: 1px solid var(--border); color: white; padding: 10px; border-radius: 4px; width: 100%; }
+        .btn { background: #444; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; transition: 0.2s; white-space: nowrap; display: flex; align-items: center; gap: 5px; }
+        .btn-primary { background: var(--accent); color: #000; font-weight: bold; }
+        .table-container { flex-grow: 1; overflow-y: auto; background: var(--card-bg); border-radius: 8px; border: 1px solid var(--border); }
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; table-layout: fixed; }
+        thead { position: sticky; top: 0; background: #333; z-index: 10; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); white-space: normal; word-break: break-all; vertical-align: top; }
+        th { color: var(--accent); }
+        tr:hover { background-color: #383838; }
+        .tag { padding: 2px 6px; border-radius: 3px; font-size: 0.8rem; font-weight: bold; color: #fff; }
+        .tag-C { background-color: #e74c3c; } .tag-W { background-color: #f39c12; } .tag-D { background-color: #9b59b6; }
+        .tag-F { background-color: #2ecc71; } .tag-P { background-color: #3498db; } .tag-S { background-color: #7f8c8d; }
+        .status-bar { font-size: 0.85rem; color: var(--text-muted); margin-top: 5px; width: 100%; }
+        .copyable { cursor: pointer; transition: color 0.2s; }
+        .copyable:hover span { color: var(--accent) !important; text-decoration: underline; }
+        #toast { visibility: hidden; min-width: 200px; background-color: var(--accent); color: #000; text-align: center; border-radius: 4px; padding: 10px; position: fixed; z-index: 1000; left: 50%; bottom: 30px; transform: translateX(-50%); font-weight: bold; opacity: 0; transition: opacity 0.3s, bottom 0.3s; }
+        #toast.show { visibility: visible; opacity: 1; bottom: 50px; }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <div class="title">🔫 CF 道具查询助手</div>
+    <div class="search-group">
+        <input type="text" id="searchInput" placeholder="搜索名称、ID、描述..." oninput="debouncedSearch()">
+    </div>
+    
+    <label class="btn">
+        🔄 更新本地数据
+        <input type="file" id="fileInput" accept=".csv" style="display:none" onchange="handleFileUpload(this)">
+    </label>
+    
+    <div id="statusBar" class="status-bar">正在尝试从云端同步数据...</div>
+</div>
+
+<div class="table-container">
+    <table id="dataTable">
+        <thead>
+            <tr>
+                <th width="110">道具ID (点我复制)</th>
+                <th width="80">代码</th>
+                <th width="180">中文名称</th>
+                <th width="180">英文名称</th>
+                <th width="70">类型</th>
+                <th width="70">价格</th>
+                <th width="70">天数</th>
+                <th>详细描述</th>
+            </tr>
+        </thead>
+        <tbody id="tableBody"></tbody>
+    </table>
+</div>
+
+<div id="toast">✅ 已复制</div>
+
+<script>
+    let allData = [];
+    const typeMapping = { 'C': '角色', 'W': '武器', 'D': '服饰', 'F': '道具', 'P': '礼包', 'S': '背包' };
+
+    // --- 核心修改：网页加载后自动获取服务器上的 data.csv ---
+    window.onload = function() {
+        autoFetchData();
+    };
+
+    async function autoFetchData() {
+        const statusBar = document.getElementById('statusBar');
+        try {
+            // 尝试读取同目录下的 data.csv
+            const response = await fetch('data.csv');
+            if (!response.ok) throw new Error('未找到云端数据文件');
+            
+            // 自动检测编码尝试：云端建议使用 UTF-8
+            const arrayBuffer = await response.arrayBuffer();
+            const decoder = new TextDecoder('utf-8'); // 如果你上传的是GBK，这里改成 'gbk'
+            const text = decoder.decode(arrayBuffer);
+            
+            parseCSV(text);
+            statusBar.innerText = "✅ 云端数据同步成功！";
+        } catch (err) {
+            console.warn(err);
+            // 如果自动加载失败，尝试加载上次缓存的数据
+            const savedData = localStorage.getItem('cf_item_data');
+            if (savedData) {
+                allData = JSON.parse(savedData);
+                search();
+                statusBar.innerText = "💡 云端同步失败，已加载本地缓存数据。";
+            } else {
+                statusBar.innerText = "❌ 未发现数据文件，请手动点击按钮导入一次。";
+            }
+        }
+    }
+
+    // 解析、搜索、渲染、复制等逻辑与之前保持一致
+    function handleFileUpload(input) {
+        const file = input.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            parseCSV(e.target.result);
+            localStorage.setItem('cf_item_data', JSON.stringify(allData));
+            alert("手动导入成功！");
+        };
+        reader.readAsText(file, 'gbk'); // 手动导入通常是本地导出的GBK
+    }
+
+    function parseCSV(text) {
+        const lines = text.split(/\r?\n/);
+        allData = [];
+        for (let i = 1; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line) continue;
+            const parts = parseCSVLine(line);
+            if (parts.length >= 8) {
+                allData.push({
+                    id: parts[0]||"", code: parts[1]||"", engName: parts[2]||"", 
+                    type: parts[3]||"", price: parts[4]||"", days: parts[5]||"", 
+                    chnName: parts[7]||"", desc: parts[8]||parts[6]||"",
+                    searchStr: `${parts[7]} ${parts[2]} ${parts[1]} ${parts[8]}`.toLowerCase()
+                });
+            }
+        }
+        search();
+    }
+
+    function parseCSVLine(text) {
+        const re_value = /(?!\s*$)\s*(?:'([^'\\]*(?:\\[\S\s][^'\\]*)*)'|"([^"\\]*(?:\\[\S\s][^"\\]*)*)"|([^,'"\s\\]*(?:\s+[^,'"\s\\]+)*))\s*(?:,|$)/g;
+        let a = [];
+        text.replace(re_value, (m, m1, m2, m3) => {
+            a.push(m1 !== undefined ? m1.replace(/\\'/g, "'") : (m2 !== undefined ? m2.replace(/\\"/g, '"') : m3));
+            return '';
+        });
+        return a;
+    }
+
+    let debounceTimer;
+    function debouncedSearch() {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(search, 300);
+    }
+
+    function search() {
+        const keyword = document.getElementById('searchInput').value.toLowerCase().trim();
+        const results = allData.filter(item => keyword === "" || item.id.includes(keyword) || item.searchStr.includes(keyword)).slice(0, 100);
+        renderTable(results);
+    }
+
+    function renderTable(data) {
+        const tbody = document.getElementById('tableBody');
+        tbody.innerHTML = data.length ? data.map(item => `
+            <tr>
+                <td onclick="copyToClipboard('${item.id}')" class="copyable"><span>${item.id} 📋</span></td>
+                <td>${item.code}</td>
+                <td style="color:var(--accent);font-weight:bold">${item.chnName}</td>
+                <td>${item.engName}</td>
+                <td><span class="tag tag-${item.type}">${typeMapping[item.type]||item.type}</span></td>
+                <td>${item.price}</td>
+                <td>${item.days === '999999999' ? '永久' : item.days + '天'}</td>
+                <td>${item.desc}</td>
+            </tr>
+        `).join('') : '<tr><td colspan="8" style="text-align:center">暂无数据</td></tr>';
+    }
+
+    function copyToClipboard(text) {
+        navigator.clipboard.writeText(text).then(() => showToast(`已复制: ${text}`));
+    }
+
+    function showToast(msg) {
+        const t = document.getElementById("toast");
+        t.innerText = msg; t.classList.add("show");
+        setTimeout(() => t.classList.remove("show"), 2000);
+    }
+</script>
+
+</body>
+</html>
